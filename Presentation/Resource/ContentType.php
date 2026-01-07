@@ -40,7 +40,7 @@ class ContentType extends GenericResource
         'application/vnd.openxmlformats-officedocument.theme+xml' => Theme::class,
         // Core Properties (Dublin Core metadata)
         'application/vnd.openxmlformats-package.core-properties+xml' => CoreProperties::class,
-        'application/vnd.openxmlformats-officedocument.extended-properties+xml' => XmlResource::class,
+        'application/vnd.openxmlformats-officedocument.extended-properties+xml' => AppProperties::class,
         // Charts (DrawingML)
         'application/vnd.openxmlformats-officedocument.drawingml.chart+xml' => Chart::class,
         // Images - Standard formats
@@ -241,20 +241,19 @@ class ContentType extends GenericResource
     /**
      * Look for a similar file in the archive.
      *
-     * For structural resources (SlideMasters, SlideLayouts, Themes, NoteMasters),
-     * searches by type rather than content to enable proper reuse during merge.
-     * For other resources, uses content hash comparison.
+     * For SlideMasters and NoteMasters: searches by type (reuse the first found)
+     * For SlideLayouts and Themes: searches by content hash (each can be unique)
+     * For other resources (images, media): searches by content hash
      *
      * @param GenericResource $originalResource Resource to compare
      * @return GenericResource|null Existing resource if found
      */
     public function lookForSimilarFile(GenericResource $originalResource): ?GenericResource
     {
-        // For structural resources (Masters, Layouts, Themes)
+        // For structural resources (SlideMasters, NoteMasters)
         // Search by type rather than exact content to enable reuse during merge
+        // NOTE: SlideLayouts are NOT included here as each layout can be unique
         if ($originalResource instanceof SlideMaster ||
-            $originalResource instanceof SlideLayout ||
-            $originalResource instanceof Theme ||
             $originalResource instanceof NoteMaster) {
             
             // Search in cache first
@@ -288,11 +287,11 @@ class ContentType extends GenericResource
             return null;
         }
         
-        // For other resources (images, media, etc.), use content hash comparison
+        // For Themes and other resources (images, media, etc.), use content hash comparison
         $startBy = dirname($originalResource->getTarget()) . '/';
         foreach ($this->cachedFilename as $path) {
             if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
-                $existingFile = $this->getResource($path, $originalResource->getRelType(), false, false);
+                $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
                 if ($existingFile instanceof GenericResource
                     && $existingFile->getHashFile() === $originalResource->getHashFile()) {
                     return $existingFile;

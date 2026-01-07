@@ -42,8 +42,12 @@ class Presentation extends XmlResource
 
             $currentSlides = $this->content->xpath('p:sldIdLst/p:sldId');
 
+            // PowerPoint slide IDs must be sequential starting from 256
+            // Calculate the next sequential ID based on the number of existing slides
+            $nextId = 256 + count($currentSlides);
+
             $ref = $this->content->xpath('p:sldIdLst')[0]->addChild('sldId');
-            $ref->addAttribute('id', (string) ((int) end($currentSlides)['id'] + 1));
+            $ref->addAttribute('id', (string) $nextId);
             $ref->addAttribute('r:id', $rId, $this->namespaces['r']);
 
             return $rId;

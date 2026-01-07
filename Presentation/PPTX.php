@@ -9,10 +9,12 @@ use Cristal\Presentation\Cache\ImageCache;
 use Cristal\Presentation\Config\OptimizationConfig;
 use Cristal\Presentation\Exception\FileOpenException;
 use Cristal\Presentation\Exception\FileSaveException;
+use Cristal\Presentation\Resource\AppProperties;
 use Cristal\Presentation\Resource\ContentType;
 use Cristal\Presentation\Resource\GenericResource;
 use Cristal\Presentation\Resource\Image;
 use Cristal\Presentation\Resource\NoteMaster;
+use Cristal\Presentation\Resource\NoteSlide;
 use Cristal\Presentation\Resource\Presentation;
 use Cristal\Presentation\Resource\Slide;
 use Cristal\Presentation\Resource\SlideLayout;
@@ -227,8 +229,11 @@ class PPTX
                 return $existingResource;
             }
             
-            // For XmlResource, reuse only structural resources (Masters, Layouts, Themes)
-            if ($this->shouldReuseXmlResource($originalResource)) {
+            // For XmlResource, reuse structural resources (SlideMasters, NoteMasters)
+            // OR SlideLayouts and Themes found by content hash comparison
+            if ($this->shouldReuseXmlResource($originalResource)
+                || $originalResource instanceof Theme
+                || $originalResource instanceof SlideLayout) {
                 return $existingResource;
             }
         }
@@ -250,8 +255,10 @@ class PPTX
 
     /**
      * Determine if an XmlResource should be reused instead of cloned.
-     * Structural resources (SlideMasters, SlideLayouts, Themes, NoteMasters)
-     * should be reused to avoid corruption in PowerPoint.
+     * Only SlideMasters and NoteMasters should be automatically reused by type.
+     *
+     * Note: SlideLayouts and Themes are compared by content hash, not automatically
+     * reused, because each can be unique (different layouts/themes for different purposes).
      *
      * @param XmlResource $resource The XML resource to check
      * @return bool True if the resource should be reused
@@ -259,8 +266,6 @@ class PPTX
     protected function shouldReuseXmlResource(XmlResource $resource): bool
     {
         return $resource instanceof SlideMaster
-            || $resource instanceof SlideLayout
-            || $resource instanceof Theme
             || $resource instanceof NoteMaster;
     }
 
@@ -274,7 +279,15 @@ class PPTX
         foreach ($clonedResources as $resource) {
             if ($resource instanceof XmlResource) {
                 foreach ($resource->getResources() as $rId => $subResource) {
-                    $resource->setResource($rId, $clonedResources[$subResource->getTarget()]);
+                    $targetKey = $subResource->getTarget();
+                    
+                    // If the resource was cloned, use the cloned version
+                    // Otherwise, keep the existing reference (reused resource)
+                    if (array_key_exists($targetKey, $clonedResources)) {
+                        $resource->setResource($rId, $clonedResources[$targetKey]);
+                    }
+                    // If not in clonedResources, the resource was reused (already exists in document)
+                    // Keep the original reference - no update needed
                 }
             }
         }
@@ -496,6 +509,12 @@ class PPTX
      */
     public function saveAs(string $target): void
     {
+        // Normalize slide IDs to be sequential starting from 256
+        $this->normalizeSlideIds();
+        
+        // Update app.xml metadata before saving
+        $this->updateAppProperties();
+        
         $this->close();
 
         if (!copy($this->tmpName, $target)) {
@@ -503,6 +522,57 @@ class PPTX
         }
 
         $this->openFile($this->tmpName);
+    }
+
+    /**
+     * Normalize slide IDs to be sequential starting from 256 (PowerPoint standard).
+     */
+    protected function normalizeSlideIds(): void
+    {
+        $xml = $this->presentation->getXmlContent();
+        $xml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+        
+        $slides = $xml->xpath('//p:sldIdLst/p:sldId');
+        
+        foreach ($slides as $index => $slide) {
+            $expectedId = 256 + $index;
+            $slide['id'] = (string)$expectedId;
+        }
+        
+        $this->presentation->save();
+    }
+
+    /**
+     * Update app.xml with current slide and notes counts.
+     */
+    protected function updateAppProperties(): void
+    {
+        try {
+            $appProps = $this->contentType->getResource('docProps/app.xml');
+            
+            if ($appProps instanceof AppProperties) {
+                // Count slides
+                $slideCount = count($this->slides);
+                $appProps->updateSlideCount($slideCount);
+                
+                // Count notes
+                $notesCount = 0;
+                foreach ($this->slides as $slide) {
+                    foreach ($slide->getResources() as $resource) {
+                        if ($resource instanceof NoteSlide) {
+                            $notesCount++;
+                            break;
+                        }
+                    }
+                }
+                $appProps->updateNotesCount($notesCount);
+                
+                $appProps->save();
+            }
+        } catch (\Exception $e) {
+            // If app.xml doesn't exist or can't be updated, continue anyway
+            // This is not critical for PPTX functionality
+        }
     }
 
     /**
