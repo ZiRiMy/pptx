@@ -241,11 +241,54 @@ class ContentType extends GenericResource
     /**
      * Look for a similar file in the archive.
      *
+     * For structural resources (SlideMasters, SlideLayouts, Themes, NoteMasters),
+     * searches by type rather than content to enable proper reuse during merge.
+     * For other resources, uses content hash comparison.
+     *
      * @param GenericResource $originalResource Resource to compare
      * @return GenericResource|null Existing resource if found
      */
     public function lookForSimilarFile(GenericResource $originalResource): ?GenericResource
     {
+        // For structural resources (Masters, Layouts, Themes)
+        // Search by type rather than exact content to enable reuse during merge
+        if ($originalResource instanceof SlideMaster ||
+            $originalResource instanceof SlideLayout ||
+            $originalResource instanceof Theme ||
+            $originalResource instanceof NoteMaster) {
+            
+            // Search in cache first
+            if ($this->useLRUCache) {
+                foreach ($this->cachedResources->all() as $existingResource) {
+                    if (get_class($existingResource) === get_class($originalResource)) {
+                        return $existingResource;
+                    }
+                }
+            } else {
+                foreach ($this->cachedResources as $existingResource) {
+                    if ($existingResource instanceof GenericResource &&
+                        get_class($existingResource) === get_class($originalResource)) {
+                        return $existingResource;
+                    }
+                }
+            }
+            
+            // If not in cache, search in files
+            $startBy = dirname($originalResource->getTarget()) . '/';
+            foreach ($this->cachedFilename as $path) {
+                if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
+                    $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
+                    if ($existingFile instanceof GenericResource &&
+                        get_class($existingFile) === get_class($originalResource)) {
+                        return $existingFile;
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        // For other resources (images, media, etc.), use content hash comparison
         $startBy = dirname($originalResource->getTarget()) . '/';
         foreach ($this->cachedFilename as $path) {
             if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {

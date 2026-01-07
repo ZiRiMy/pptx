@@ -12,8 +12,12 @@ use Cristal\Presentation\Exception\FileSaveException;
 use Cristal\Presentation\Resource\ContentType;
 use Cristal\Presentation\Resource\GenericResource;
 use Cristal\Presentation\Resource\Image;
+use Cristal\Presentation\Resource\NoteMaster;
 use Cristal\Presentation\Resource\Presentation;
 use Cristal\Presentation\Resource\Slide;
+use Cristal\Presentation\Resource\SlideLayout;
+use Cristal\Presentation\Resource\SlideMaster;
+use Cristal\Presentation\Resource\Theme;
 use Cristal\Presentation\Resource\XmlResource;
 use Cristal\Presentation\Stats\OptimizationStats;
 use Cristal\Presentation\Validator\ImageValidator;
@@ -217,8 +221,16 @@ class PPTX
         // Check if resource already exists in the document
         $existingResource = $this->getContentType()->lookForSimilarFile($originalResource);
 
-        if ($existingResource !== null && !$originalResource instanceof XmlResource) {
-            return $existingResource;
+        if ($existingResource !== null) {
+            // Always reuse non-XmlResource (images, media, etc.)
+            if (!$originalResource instanceof XmlResource) {
+                return $existingResource;
+            }
+            
+            // For XmlResource, reuse only structural resources (Masters, Layouts, Themes)
+            if ($this->shouldReuseXmlResource($originalResource)) {
+                return $existingResource;
+            }
         }
 
         // Clone and configure the resource
@@ -234,6 +246,22 @@ class PPTX
         }
 
         return $resource;
+    }
+
+    /**
+     * Determine if an XmlResource should be reused instead of cloned.
+     * Structural resources (SlideMasters, SlideLayouts, Themes, NoteMasters)
+     * should be reused to avoid corruption in PowerPoint.
+     *
+     * @param XmlResource $resource The XML resource to check
+     * @return bool True if the resource should be reused
+     */
+    protected function shouldReuseXmlResource(XmlResource $resource): bool
+    {
+        return $resource instanceof SlideMaster
+            || $resource instanceof SlideLayout
+            || $resource instanceof Theme
+            || $resource instanceof NoteMaster;
     }
 
     /**

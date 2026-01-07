@@ -20,6 +20,12 @@ class Presentation extends XmlResource
     public function addResource(ResourceInterface $resource): ?string
     {
         if ($resource instanceof NoteMaster) {
+            // Check if this NoteMaster is already registered
+            $existingRId = $this->findExistingResourceId($resource);
+            if ($existingRId !== null) {
+                return $existingRId;
+            }
+
             $rId = parent::addResource($resource);
             if (!count($this->content->xpath('p:notesMasterIdLst'))) {
                 $this->content->addChild('p:notesMasterIdLst');
@@ -44,6 +50,12 @@ class Presentation extends XmlResource
         }
 
         if ($resource instanceof SlideMaster) {
+            // Check if this SlideMaster is already registered
+            $existingRId = $this->findExistingResourceId($resource);
+            if ($existingRId !== null) {
+                return $existingRId;
+            }
+
             $rId = parent::addResource($resource);
 
             $ref = $this->content->xpath('p:sldMasterIdLst')[0]->addChild('sldMasterId');
@@ -61,6 +73,26 @@ class Presentation extends XmlResource
             return $rId;
         }
 
+        return null;
+    }
+
+    /**
+     * Find if a resource is already registered in this presentation.
+     * Used to avoid duplicating structural resources (Masters, Themes, etc.).
+     *
+     * @param ResourceInterface $resource The resource to check
+     * @return string|null The existing resource ID if found, null otherwise
+     */
+    private function findExistingResourceId(ResourceInterface $resource): ?string
+    {
+        $this->mapResources();
+        
+        foreach ($this->resources as $rId => $existingResource) {
+            if ($existingResource === $resource) {
+                return $rId;
+            }
+        }
+        
         return null;
     }
 }

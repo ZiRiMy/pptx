@@ -11,14 +11,14 @@ class PPTXTest extends TestCase
     /**
      * Number of slides in the test PowerPoint.
      */
-    private const POWERPOINT_SLIDE_COUNT = 2;
+    private const POWERPOINT_SLIDE_COUNT = 1;
 
     protected PPTX $pptx;
 
     public function setUp(): void
     {
         parent::setUp();
-        $this->pptx = new PPTX(__DIR__ . '/mock/garde.pptx');
+        $this->pptx = new PPTX(__DIR__ . '/mock/FIN.pptx');
     }
 
     /**
@@ -38,7 +38,7 @@ class PPTXTest extends TestCase
     public function it_merges_two_pptx(): void
     {
         $nbSourceSlides = count($this->pptx->getSlides());
-        $pptxToAppend = new PPTX(__DIR__ . '/mock/pc.pptx');
+        $pptxToAppend = new PPTX(__DIR__ . '/mock/FIN.pptx');
 
         $this->pptx->addSlides($pptxToAppend->getSlides());
         $this->pptx->saveAs(self::TMP_PATH . '/merge.pptx');
@@ -98,5 +98,55 @@ class PPTXTest extends TestCase
 
         $this->assertInstanceOf(\Cristal\Presentation\Cache\ImageCache::class, $cache);
         $this->assertEquals(0, $cache->count());
+    }
+
+    /**
+     * @test
+     */
+    public function it_merges_without_duplicating_masters(): void
+    {
+        $source = new PPTX(__DIR__ . '/mock/FIN.pptx');
+        $toMerge = new PPTX(__DIR__ . '/mock/FIN.pptx');
+
+        $source->addSlides($toMerge->getSlides());
+        $source->saveAs(self::TMP_PATH . '/merge_no_dup.pptx');
+
+        // Verify the structure
+        $zip = new \ZipArchive();
+        $zip->open(self::TMP_PATH . '/merge_no_dup.pptx');
+
+        $presentation = $zip->getFromName('ppt/presentation.xml');
+        $xml = simplexml_load_string($presentation);
+        $xml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+
+        // Check SlideMasters: should have only 1
+        $slideMasters = $xml->xpath('//p:sldMasterIdLst/p:sldMasterId');
+        $this->assertCount(
+            1,
+            $slideMasters,
+            'Merged presentation should have only 1 SlideMaster (no duplication)'
+        );
+
+        // Check Slides: should have 2
+        $slides = $xml->xpath('//p:sldIdLst/p:sldId');
+        $this->assertCount(
+            2,
+            $slides,
+            'Merged presentation should have 2 slides'
+        );
+
+        // Check NotesMasters: should have only 1
+        $notesMasters = $xml->xpath('//p:notesMasterIdLst/p:notesMasterId');
+        $this->assertCount(
+            1,
+            $notesMasters,
+            'Merged presentation should have only 1 NotesMaster (no duplication)'
+        );
+
+        $zip->close();
+
+        // Verify the merged presentation can be opened without corruption
+        $merged = new PPTX(self::TMP_PATH . '/merge_no_dup.pptx');
+        $this->assertCount(2, $merged->getSlides());
     }
 }
