@@ -18,6 +18,55 @@ class Slide extends XmlResource
     protected const TEMPLATE_SEPARATOR = '.';
 
     /**
+     * Section information from source document.
+     *
+     * @var array{name: string, id: string}|null
+     */
+    protected ?array $sourceSection = null;
+
+    /**
+     * Original slide ID from source document.
+     */
+    protected ?int $sourceSlideId = null;
+
+    /**
+     * Get the section information from the source presentation.
+     *
+     * @return array{name: string, id: string}|null Section info or null
+     */
+    public function getSourceSection(): ?array
+    {
+        return $this->sourceSection;
+    }
+
+    /**
+     * Set the section information from the source presentation.
+     *
+     * @param string $name Section name
+     * @param string $id Section GUID
+     */
+    public function setSourceSection(string $name, string $id): void
+    {
+        $this->sourceSection = ['name' => $name, 'id' => $id];
+    }
+
+    /**
+     * Get the original slide ID from source document.
+     */
+    public function getSourceSlideId(): ?int
+    {
+        return $this->sourceSlideId;
+    }
+
+    /**
+     * Set the original slide ID from source document.
+     */
+    public function setSourceSlideId(int $id): void
+    {
+        $this->sourceSlideId = $id;
+    }
+
+    /**
      * Template name for table row replacement.
      */
     protected const TABLE_ROW_TEMPLATE_NAME = 'replaceByNewRow';

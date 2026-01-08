@@ -117,16 +117,59 @@ class PPTX
     protected function loadSlides(): self
     {
         $this->slides = [];
+        
+        // Build a map of slideId -> section info
+        $slideSections = $this->extractSlideSections();
 
         foreach ($this->presentation->getXmlContent()->xpath('p:sldIdLst/p:sldId') as $slide) {
             $id = $slide->xpath('@r:id')[0]['id'] . '';
+            $slideId = (int) $slide['id'];
             $resource = $this->presentation->getResource($id);
             if ($resource instanceof Slide) {
+                // Set section info if available
+                if (isset($slideSections[$slideId])) {
+                    $section = $slideSections[$slideId];
+                    $resource->setSourceSection($section['name'], $section['id']);
+                    $resource->setSourceSlideId($slideId);
+                }
                 $this->slides[] = $resource;
             }
         }
 
         return $this;
+    }
+
+    /**
+     * Extract section information for each slide from presentation.xml.
+     *
+     * @return array<int, array{name: string, id: string}> Map of slideId => section info
+     */
+    protected function extractSlideSections(): array
+    {
+        $slideSections = [];
+        $xml = $this->presentation->getXmlContent();
+        
+        // Register namespaces for sections (Office 2010+)
+        $xml->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+        
+        // Find sectionLst in extLst
+        $sections = $xml->xpath('//p14:sectionLst/p14:section');
+        
+        foreach ($sections as $section) {
+            $sectionName = (string) $section['name'];
+            $sectionId = (string) $section['id'];
+            
+            // Get all slide IDs in this section
+            foreach ($section->xpath('p14:sldIdLst/p14:sldId') as $sldId) {
+                $slideId = (int) $sldId['id'];
+                $slideSections[$slideId] = [
+                    'name' => $sectionName,
+                    'id' => $sectionId,
+                ];
+            }
+        }
+        
+        return $slideSections;
     }
 
     /**
@@ -757,20 +800,51 @@ class PPTX
 
     /**
      * Normalize slide IDs to be sequential starting from 256 (PowerPoint standard).
+     * Also updates the section list to use the new IDs.
      */
     protected function normalizeSlideIds(): void
     {
         $xml = $this->presentation->getXmlContent();
         $xml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+        $xml->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
         
+        // Build mapping of old ID -> new ID
+        $idMapping = [];
         $slides = $xml->xpath('//p:sldIdLst/p:sldId');
         
         foreach ($slides as $index => $slide) {
-            $expectedId = 256 + $index;
-            $slide['id'] = (string)$expectedId;
+            $oldId = (int) $slide['id'];
+            $newId = 256 + $index;
+            $idMapping[$oldId] = $newId;
+            $slide['id'] = (string)$newId;
         }
         
+        // Update section IDs using the mapping
+        $this->updateSectionSlideIds($xml, $idMapping);
+        
         $this->presentation->save();
+    }
+    
+    /**
+     * Update slide IDs in section list to match the new sequential IDs.
+     *
+     * @param \SimpleXMLElement $xml The presentation XML
+     * @param array<int, int> $idMapping Mapping of old ID => new ID
+     */
+    protected function updateSectionSlideIds(\SimpleXMLElement $xml, array $idMapping): void
+    {
+        $sections = $xml->xpath('//p14:sectionLst/p14:section');
+        
+        foreach ($sections as $section) {
+            $sldIds = $section->xpath('p14:sldIdLst/p14:sldId');
+            
+            foreach ($sldIds as $sldId) {
+                $oldId = (int) $sldId['id'];
+                if (isset($idMapping[$oldId])) {
+                    $sldId['id'] = (string) $idMapping[$oldId];
+                }
+            }
+        }
     }
 
     /**

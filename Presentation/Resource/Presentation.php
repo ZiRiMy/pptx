@@ -53,6 +53,12 @@ class Presentation extends XmlResource
             $ref->addAttribute('id', (string) $nextId);
             $ref->addAttribute('r:id', $rId, $this->namespaces['r']);
 
+            // Add slide to section if it has source section info
+            $sourceSection = $resource->getSourceSection();
+            if ($sourceSection !== null) {
+                $this->addSlideToSection($nextId, $sourceSection['name'], $sourceSection['id']);
+            }
+
             return $rId;
         }
 
@@ -81,6 +87,54 @@ class Presentation extends XmlResource
         }
 
         return null;
+    }
+
+    /**
+     * Add a slide to a section in the sectionLst.
+     * Creates the section if it doesn't exist.
+     *
+     * @param int $slideId The slide ID to add
+     * @param string $sectionName The section name
+     * @param string $sectionGuid The section GUID
+     */
+    protected function addSlideToSection(int $slideId, string $sectionName, string $sectionGuid): void
+    {
+        // Register p14 namespace
+        $this->content->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+        
+        // Find existing sectionLst in extLst
+        $sectionLst = $this->content->xpath('//p14:sectionLst');
+        
+        if (empty($sectionLst)) {
+            // No sections exist yet - we need to create extLst and sectionLst
+            // This is complex - for now we'll just skip if no sections exist
+            return;
+        }
+        
+        $sectionLst = $sectionLst[0];
+        
+        // Find section by name
+        $existingSection = $sectionLst->xpath("p14:section[@name='$sectionName']");
+        
+        if (!empty($existingSection)) {
+            // Section exists - add slide ID to it
+            $section = $existingSection[0];
+        } else {
+            // Create new section
+            $section = $sectionLst->addChild('section', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+            $section->addAttribute('name', $sectionName);
+            $section->addAttribute('id', $sectionGuid);
+            
+            // Add sldIdLst to section
+            $section->addChild('sldIdLst', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+        }
+        
+        // Add slide ID to section's sldIdLst
+        $sldIdLst = $section->xpath('p14:sldIdLst');
+        if (!empty($sldIdLst)) {
+            $sldId = $sldIdLst[0]->addChild('sldId', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+            $sldId->addAttribute('id', (string) $slideId);
+        }
     }
 
     /**
