@@ -174,18 +174,31 @@ class PPTX
      */
     protected function processResourceTree(GenericResource $res): array
     {
-        $tree = $this->getResourceTree($res);
+        // Get the tree with information about which resources must be force-cloned
+        $resourceList = [];
+        $forceCloneTargets = [];
+        $tree = $this->getResourceTree($res, $resourceList, $forceCloneTargets);
 
         /** @var array<string, ResourceInterface> $clonedResources */
         $clonedResources = [];
+        
+        /** @var array<string, ResourceInterface> $resourceMapping */
+        $resourceMapping = [];
 
         // Clone, rename, and set new destination
         foreach ($tree as $originalResource) {
-            $clonedResources[$originalResource->getTarget()] = $this->cloneOrReuseResource($originalResource);
+            $forceClone = in_array($originalResource->getTarget(), $forceCloneTargets, true);
+            $newResource = $this->cloneOrReuseResource($originalResource, $forceClone);
+            $clonedResources[$originalResource->getTarget()] = $newResource;
+            // Map old target to new resource (for reference updates)
+            $resourceMapping[$originalResource->getTarget()] = $newResource;
         }
+        
+        // Synchronize NoteSlide numbering with their parent Slide
+        $this->synchronizeNoteSlideNumbering($clonedResources, $res);
 
-        // Update resource references
-        $this->updateResourceReferences($clonedResources);
+        // Update resource references using the complete mapping
+        $this->updateResourceReferences($clonedResources, $resourceMapping);
 
         // Notify presentation and register slides
         $this->registerResourcesWithPresentation($clonedResources, $res);
@@ -195,46 +208,105 @@ class PPTX
 
         return $clonedResources;
     }
+    
+    /**
+     * Synchronize NoteSlide numbering with their parent Slide.
+     * NoteSlides must have the same number as their slide (slide15 -> notesSlide15).
+     *
+     * @param array<string, ResourceInterface> $clonedResources
+     * @param GenericResource $rootResource The root resource being processed (usually a Slide)
+     */
+    protected function synchronizeNoteSlideNumbering(array $clonedResources, GenericResource $rootResource): void
+    {
+        // Only process if the root resource is a Slide
+        if (!$rootResource instanceof Slide) {
+            return;
+        }
+        
+        // Find the cloned slide and its number
+        $clonedSlide = null;
+        foreach ($clonedResources as $resource) {
+            if ($resource instanceof Slide) {
+                $clonedSlide = $resource;
+                break;
+            }
+        }
+        
+        if ($clonedSlide === null) {
+            return;
+        }
+        
+        // Extract slide number from slide filename (e.g., slide15.xml -> 15)
+        if (!preg_match('#/slide(\d+)\.xml$#', $clonedSlide->getTarget(), $slideMatches)) {
+            return;
+        }
+        
+        $slideNumber = $slideMatches[1];
+        
+        // Find and rename the NoteSlide to match the slide number
+        foreach ($clonedResources as $resource) {
+            if ($resource instanceof NoteSlide && $resource instanceof GenericResource) {
+                $oldTarget = $resource->getTarget();
+                $expectedName = "notesSlide{$slideNumber}.xml";
+                $newTarget = dirname($oldTarget) . '/' . $expectedName;
+                
+                // Only update if path changed
+                if ($oldTarget !== $newTarget) {
+                    // Update ContentType with new path
+                    $this->contentType->updateResourcePath($oldTarget, $newTarget);
+                    
+                    // Rename the resource
+                    $resource->rename($expectedName);
+                }
+                break;
+            }
+        }
+    }
 
     /**
      * Clone or reuse an existing resource.
      *
      * @param ResourceInterface $originalResource The original resource
+     * @param bool $forceClone Force cloning even if a similar resource exists
      * @return ResourceInterface The cloned or reused resource
      */
-    protected function cloneOrReuseResource(ResourceInterface $originalResource): ResourceInterface
+    protected function cloneOrReuseResource(ResourceInterface $originalResource, bool $forceClone = false): ResourceInterface
     {
         if (!$originalResource instanceof GenericResource) {
             return clone $originalResource;
         }
 
-        // Check for image deduplication
-        if ($originalResource instanceof Image && $this->config->isEnabled('deduplicate_images')) {
-            $duplicate = $this->imageCache->findDuplicate($originalResource->getContent());
-            if ($duplicate !== null) {
-                if ($this->config->isEnabled('collect_stats')) {
-                    $this->stats->recordDeduplication();
+        // If force clone is requested, skip reuse checks
+        if (!$forceClone) {
+            // Check for image deduplication
+            if ($originalResource instanceof Image && $this->config->isEnabled('deduplicate_images')) {
+                $duplicate = $this->imageCache->findDuplicate($originalResource->getContent());
+                if ($duplicate !== null) {
+                    if ($this->config->isEnabled('collect_stats')) {
+                        $this->stats->recordDeduplication();
+                    }
+
+                    return $duplicate;
                 }
-
-                return $duplicate;
             }
-        }
 
-        // Check if resource already exists in the document
-        $existingResource = $this->getContentType()->lookForSimilarFile($originalResource);
+            // Check if resource already exists in the document
+            // lookForSimilarFile() handles external resources safely
+            $existingResource = $this->getContentType()->lookForSimilarFile($originalResource);
 
-        if ($existingResource !== null) {
-            // Always reuse non-XmlResource (images, media, etc.)
-            if (!$originalResource instanceof XmlResource) {
-                return $existingResource;
-            }
-            
-            // For XmlResource, reuse structural resources (SlideMasters, NoteMasters)
-            // OR SlideLayouts and Themes found by content hash comparison
-            if ($this->shouldReuseXmlResource($originalResource)
-                || $originalResource instanceof Theme
-                || $originalResource instanceof SlideLayout) {
-                return $existingResource;
+            if ($existingResource !== null) {
+                // Always reuse non-XmlResource (images, media, etc.)
+                if (!$originalResource instanceof XmlResource) {
+                    return $existingResource;
+                }
+                
+                // For XmlResource, reuse structural resources (SlideMasters, NoteMasters)
+                // OR SlideLayouts and Themes found by content hash comparison
+                if ($this->shouldReuseXmlResource($originalResource)
+                    || $originalResource instanceof Theme
+                    || $originalResource instanceof SlideLayout) {
+                    return $existingResource;
+                }
             }
         }
 
@@ -255,40 +327,86 @@ class PPTX
 
     /**
      * Determine if an XmlResource should be reused instead of cloned.
-     * Only SlideMasters and NoteMasters should be automatically reused by type.
      *
-     * Note: SlideLayouts and Themes are compared by content hash, not automatically
-     * reused, because each can be unique (different layouts/themes for different purposes).
+     * All structural XML resources (SlideMasters, NoteMasters, SlideLayouts, Themes)
+     * are now compared by content hash in lookForSimilarFile(), so if a similar
+     * resource is found, it means an IDENTICAL resource exists and should be reused.
      *
      * @param XmlResource $resource The XML resource to check
-     * @return bool True if the resource should be reused
+     * @return bool True if the resource should be reused when found by lookForSimilarFile()
      */
     protected function shouldReuseXmlResource(XmlResource $resource): bool
     {
+        // All structural resources should be reused if lookForSimilarFile() found an identical one
         return $resource instanceof SlideMaster
-            || $resource instanceof NoteMaster;
+            || $resource instanceof NoteMaster
+            || $resource instanceof SlideLayout
+            || $resource instanceof Theme;
     }
 
     /**
      * Update resource references after cloning.
      *
-     * @param array<string, ResourceInterface> $clonedResources
+     * This method updates references in ALL resources (both cloned and reused)
+     * to ensure they point to the correct resources in the destination document.
+     *
+     * Critical for merge operations: When a SlideLayout is reused, its internal
+     * references to SlideMaster must be updated to point to the reused SlideMaster
+     * in the destination document, not the original source document.
+     *
+     * @param array<string, ResourceInterface> $clonedResources Resources that were cloned or reused
+     * @param array<string, ResourceInterface> $resourceMapping Complete mapping of old target -> new resource
      */
-    protected function updateResourceReferences(array $clonedResources): void
+    protected function updateResourceReferences(array $clonedResources, array $resourceMapping): void
     {
+        // Track which resources need their .rels regenerated
+        $resourcesToSave = [];
+        
+        // Update references for ALL resources in the processed tree
+        // This includes both newly cloned AND reused resources
         foreach ($clonedResources as $resource) {
-            if ($resource instanceof XmlResource) {
-                foreach ($resource->getResources() as $rId => $subResource) {
-                    $targetKey = $subResource->getTarget();
+            if (!($resource instanceof XmlResource)) {
+                continue;
+            }
+            
+            $needsUpdate = false;
+            $currentResources = $resource->getResources();
+            
+            foreach ($currentResources as $rId => $subResource) {
+                $targetKey = $subResource->getTarget();
+                
+                // If we have a mapping for this target, update the reference
+                if (array_key_exists($targetKey, $resourceMapping)) {
+                    $mappedResource = $resourceMapping[$targetKey];
                     
-                    // If the resource was cloned, use the cloned version
-                    // Otherwise, keep the existing reference (reused resource)
-                    if (array_key_exists($targetKey, $clonedResources)) {
-                        $resource->setResource($rId, $clonedResources[$targetKey]);
+                    // Only update if the reference changed
+                    // (different object or different document)
+                    if ($subResource !== $mappedResource ||
+                        ($subResource instanceof GenericResource &&
+                         $mappedResource instanceof GenericResource &&
+                         $subResource->getDocument() !== $mappedResource->getDocument())) {
+                        
+                        $resource->setResource($rId, $mappedResource);
+                        $needsUpdate = true;
                     }
-                    // If not in clonedResources, the resource was reused (already exists in document)
-                    // Keep the original reference - no update needed
                 }
+            }
+            
+            // If references were updated, force regeneration of .rels file
+            if ($needsUpdate) {
+                $resourcesToSave[] = $resource;
+            }
+        }
+        
+        // Force save all resources that had reference updates
+        // This ensures .rels files are regenerated even for reused resources
+        foreach ($resourcesToSave as $resource) {
+            // XmlResource::performSave() will regenerate the .rels file
+            // We need to call it directly to bypass isDraft() check
+            if (method_exists($resource, 'performSave')) {
+                $reflection = new \ReflectionMethod($resource, 'performSave');
+                $reflection->setAccessible(true);
+                $reflection->invoke($resource);
             }
         }
     }
@@ -301,13 +419,38 @@ class PPTX
      */
     protected function registerResourcesWithPresentation(array $clonedResources, GenericResource $originalResource): void
     {
-        foreach ($clonedResources as $resource) {
-            $this->presentation->addResource($resource);
+        foreach ($clonedResources as $originalTarget => $resource) {
+            // Only add resources that were actually cloned (new resources)
+            // Skip resources that were reused (already exist in the presentation)
+            if ($resource instanceof GenericResource && !$this->isResourceAlreadyInPresentation($resource)) {
+                $this->presentation->addResource($resource);
+            }
 
             if ($resource instanceof Slide) {
                 $this->slides[] = $resource;
             }
         }
+    }
+
+    /**
+     * Check if a resource is already registered in the presentation.
+     *
+     * @param GenericResource $resource The resource to check
+     * @return bool True if the resource exists in presentation
+     */
+    protected function isResourceAlreadyInPresentation(GenericResource $resource): bool
+    {
+        // Check if this resource is already in presentation's resources
+        $presentationResources = $this->presentation->getResources();
+        
+        foreach ($presentationResources as $existingResource) {
+            if ($existingResource instanceof GenericResource &&
+                $existingResource->getTarget() === $resource->getTarget()) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 
     /**
@@ -430,9 +573,18 @@ class PPTX
     }
 
     /**
-     * @return ResourceInterface[]
+     * Get the resource tree for a given resource.
+     *
+     * Important: Stops recursion at SlideMasters/NoteMasters that will be REUSED.
+     * For NEW masters (will be cloned), traverse their children and mark their
+     * direct dependencies (Theme) as force-clone to maintain proper references.
+     *
+     * @param ResourceInterface $resource The root resource
+     * @param array $resourceList Accumulated resource list
+     * @param array $forceCloneTargets Targets that must be force-cloned (passed by reference)
+     * @return ResourceInterface[] Complete resource tree
      */
-    public function getResourceTree(ResourceInterface $resource, array &$resourceList = []): array
+    public function getResourceTree(ResourceInterface $resource, array &$resourceList = [], array &$forceCloneTargets = []): array
     {
         if (in_array($resource, $resourceList, true)) {
             return $resourceList;
@@ -441,8 +593,27 @@ class PPTX
         $resourceList[] = $resource;
 
         if ($resource instanceof XmlResource) {
+            // For SlideMasters and NoteMasters: check if they will be reused
+            // If reused (already in destination), don't traverse their children
+            // If new (will be cloned), traverse normally AND mark Theme as force-clone
+            if ($resource instanceof SlideMaster || $resource instanceof NoteMaster) {
+                $existingResource = $this->getContentType()->lookForSimilarFile($resource);
+                if ($existingResource !== null) {
+                    // This master will be reused - don't traverse its children
+                    return $resourceList;
+                }
+                
+                // This master will be cloned - mark its Theme as force-clone
+                // so the new master gets its own theme reference
+                foreach ($resource->getResources() as $subResource) {
+                    if ($subResource instanceof Theme) {
+                        $forceCloneTargets[] = $subResource->getTarget();
+                    }
+                }
+            }
+            
             foreach ($resource->getResources() as $subResource) {
-                $this->getResourceTree($subResource, $resourceList);
+                $this->getResourceTree($subResource, $resourceList, $forceCloneTargets);
             }
         }
 
@@ -512,8 +683,14 @@ class PPTX
         // Normalize slide IDs to be sequential starting from 256
         $this->normalizeSlideIds();
         
+        // Clean orphaned resources before saving
+        $this->cleanOrphanedResources();
+        
         // Update app.xml metadata before saving
         $this->updateAppProperties();
+        
+        // Save ContentType after all modifications
+        $this->contentType->save();
         
         $this->close();
 
@@ -522,6 +699,60 @@ class PPTX
         }
 
         $this->openFile($this->tmpName);
+    }
+    
+    /**
+     * Clean orphaned resources.
+     *
+     * IMPORTANT: SlideLayouts referenced by SlideMasters are KEPT even if not used by slides.
+     * PowerPoint requires SlideMasters to have valid layout references.
+     * Only removes revisionInfo.xml which can cause corruption.
+     */
+    protected function cleanOrphanedResources(): void
+    {
+        // Remove revisionInfo.xml if present (causes corruption)
+        $revisionInfo = 'ppt/revisionInfo.xml';
+        if ($this->archive->locateName($revisionInfo) !== false) {
+            $this->archive->deleteName($revisionInfo);
+            $this->removeFromContentTypes($revisionInfo);
+            $this->removeRevisionInfoFromPresentationRels();
+        }
+    }
+    
+    /**
+     * Remove revisionInfo relationship from presentation.xml.rels.
+     */
+    protected function removeRevisionInfoFromPresentationRels(): void
+    {
+        $relsPath = 'ppt/_rels/presentation.xml.rels';
+        $relsContent = $this->archive->getFromName($relsPath);
+        if ($relsContent === false) {
+            return;
+        }
+        
+        $xml = new \SimpleXMLElement($relsContent);
+        
+        // Register namespace for XPath
+        $xml->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/package/2006/relationships');
+        
+        // Find and remove revisionInfo relationship
+        $relationships = $xml->xpath("//r:Relationship[contains(@Type, 'revisionInfo')]");
+        foreach ($relationships as $rel) {
+            $dom = dom_import_simplexml($rel);
+            $dom->parentNode->removeChild($dom);
+        }
+        
+        // Save updated rels file
+        $this->archive->addFromString($relsPath, $xml->asXML());
+    }
+    
+    /**
+     * Remove a file from [Content_Types].xml overrides.
+     */
+    protected function removeFromContentTypes(string $path): void
+    {
+        // Use ContentType object to ensure changes are persisted when saved
+        $this->contentType->removeResource($path);
     }
 
     /**

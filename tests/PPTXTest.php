@@ -11,14 +11,14 @@ class PPTXTest extends TestCase
     /**
      * Number of slides in the test PowerPoint.
      */
-    private const POWERPOINT_SLIDE_COUNT = 1;
+    private const POWERPOINT_SLIDE_COUNT = 14;
 
     protected PPTX $pptx;
 
     public function setUp(): void
     {
         parent::setUp();
-        $this->pptx = new PPTX(__DIR__ . '/mock/FIN.pptx');
+        $this->pptx = new PPTX(__DIR__ . '/mock/DEBUT.pptx');
     }
 
     /**

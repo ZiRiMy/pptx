@@ -71,10 +71,23 @@ class GenericResource implements ResourceInterface
 
     /**
      * Load content from the archive.
+     *
+     * @throws \RuntimeException If the resource cannot be loaded
      */
     protected function loadContent(): string
     {
-        return $this->initialDocument->getArchive()->getFromName($this->getInitialTarget());
+        $content = $this->initialDocument->getArchive()->getFromName($this->getInitialTarget());
+        
+        if ($content === false) {
+            throw new \RuntimeException(
+                sprintf(
+                    'Failed to load content for resource "%s" from archive',
+                    $this->getInitialTarget()
+                )
+            );
+        }
+        
+        return $content;
     }
 
     /**

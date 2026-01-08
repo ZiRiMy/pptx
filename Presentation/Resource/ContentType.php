@@ -241,8 +241,8 @@ class ContentType extends GenericResource
     /**
      * Look for a similar file in the archive.
      *
-     * For SlideMasters and NoteMasters: searches by type (reuse the first found)
-     * For SlideLayouts and Themes: searches by content hash (each can be unique)
+     * For SlideLayouts: searches by layout type (PowerPoint standard behavior)
+     * For SlideMasters, NoteMasters, Themes: searches by content hash
      * For other resources (images, media): searches by content hash
      *
      * @param GenericResource $originalResource Resource to compare
@@ -250,44 +250,80 @@ class ContentType extends GenericResource
      */
     public function lookForSimilarFile(GenericResource $originalResource): ?GenericResource
     {
-        // For structural resources (SlideMasters, NoteMasters)
-        // Search by type rather than exact content to enable reuse during merge
-        // NOTE: SlideLayouts are NOT included here as each layout can be unique
-        if ($originalResource instanceof SlideMaster ||
-            $originalResource instanceof NoteMaster) {
-            
-            // Search in cache first
-            if ($this->useLRUCache) {
-                foreach ($this->cachedResources->all() as $existingResource) {
-                    if (get_class($existingResource) === get_class($originalResource)) {
-                        return $existingResource;
-                    }
-                }
-            } else {
-                foreach ($this->cachedResources as $existingResource) {
-                    if ($existingResource instanceof GenericResource &&
-                        get_class($existingResource) === get_class($originalResource)) {
-                        return $existingResource;
+        // For SlideLayouts: compare by layout type (title, obj, blank, etc.)
+        // This matches PowerPoint's behavior which reuses layouts with same type
+        if ($originalResource instanceof SlideLayout) {
+            $originalType = $originalResource->getLayoutType();
+            if ($originalType !== null) {
+                $startBy = dirname($originalResource->getTarget()) . '/';
+                foreach ($this->cachedFilename as $path) {
+                    if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
+                        $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
+                        if ($existingFile instanceof SlideLayout
+                            && $existingFile->getLayoutType() === $originalType) {
+                            return $existingFile;
+                        }
                     }
                 }
             }
-            
-            // If not in cache, search in files
+            return null;
+        }
+        
+        // For SlideMasters: compare by layout types signature
+        // SlideMasters with the same set of layout types are considered equivalent
+        if ($originalResource instanceof SlideMaster) {
+            $originalSignature = $originalResource->getLayoutTypesSignature();
             $startBy = dirname($originalResource->getTarget()) . '/';
             foreach ($this->cachedFilename as $path) {
                 if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
                     $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
-                    if ($existingFile instanceof GenericResource &&
-                        get_class($existingFile) === get_class($originalResource)) {
+                    if ($existingFile instanceof SlideMaster
+                        && $existingFile->getLayoutTypesSignature() === $originalSignature) {
                         return $existingFile;
                     }
                 }
             }
-            
             return null;
         }
         
-        // For Themes and other resources (images, media, etc.), use content hash comparison
+        // For NoteMasters: always reuse the first one found
+        // PowerPoint presentations typically have only one NoteMaster
+        // and they are functionally equivalent across merged presentations
+        if ($originalResource instanceof NoteMaster) {
+            $startBy = dirname($originalResource->getTarget()) . '/';
+            foreach ($this->cachedFilename as $path) {
+                if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
+                    $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
+                    if ($existingFile instanceof NoteMaster) {
+                        return $existingFile;
+                    }
+                }
+            }
+            return null;
+        }
+        
+        // For Themes: compare by content hash
+        // Different themes should NOT be reused even if they're the same type
+        if ($originalResource instanceof Theme) {
+            $startBy = dirname($originalResource->getTarget()) . '/';
+            foreach ($this->cachedFilename as $path) {
+                if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
+                    $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
+                    if ($existingFile instanceof Theme
+                        && $existingFile->getHashFile() === $originalResource->getHashFile()) {
+                        return $existingFile;
+                    }
+                }
+            }
+            return null;
+        }
+        
+        // For other resources (images, media, etc.): only compare if from same document
+        // to avoid loading content from external archives
+        if ($originalResource->getDocument() !== $this->document) {
+            return null;
+        }
+        
         $startBy = dirname($originalResource->getTarget()) . '/';
         foreach ($this->cachedFilename as $path) {
             if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
@@ -383,5 +419,85 @@ class ContentType extends GenericResource
     public function getCacheStats(): ?array
     {
         return $this->useLRUCache ? $this->cachedResources->getStats() : null;
+    }
+
+    /**
+     * Remove a resource entry from Content Types.
+     *
+     * @param string $path Path to remove (without leading /)
+     */
+    public function removeResource(string $path): void
+    {
+        $partName = '/' . ltrim($path, '/');
+        
+        // Remove from overrides array
+        unset($this->overrides[ltrim($path, '/')]);
+        
+        // Remove from XML
+        $toRemove = [];
+        $index = 0;
+        foreach ($this->content->Override as $override) {
+            if ((string)$override['PartName'] === $partName) {
+                $toRemove[] = $index;
+            }
+            $index++;
+        }
+        
+        // Remove in reverse order to maintain indices
+        foreach (array_reverse($toRemove) as $idx) {
+            unset($this->content->Override[$idx]);
+        }
+        
+        // Remove from cached filename
+        $this->cachedFilename = array_filter($this->cachedFilename, function($name) use ($path) {
+            return $name !== $path && $name !== './' . $path;
+        });
+        
+        // Remove from cache (array only, LRU cache doesn't need removal for this use case)
+        if (!$this->useLRUCache) {
+            unset($this->cachedResources[$path]);
+        }
+    }
+
+    /**
+     * Update a resource path in Content Types (for rename operations).
+     *
+     * @param string $oldPath Old path
+     * @param string $newPath New path
+     */
+    public function updateResourcePath(string $oldPath, string $newPath): void
+    {
+        $oldPartName = '/' . ltrim($oldPath, '/');
+        $newPartName = '/' . ltrim($newPath, '/');
+        
+        // Update in overrides array
+        if (isset($this->overrides[ltrim($oldPath, '/')])) {
+            $contentType = $this->overrides[ltrim($oldPath, '/')];
+            unset($this->overrides[ltrim($oldPath, '/')]);
+            $this->overrides[ltrim($newPath, '/')] = $contentType;
+        }
+        
+        // Update in XML
+        foreach ($this->content->Override as $override) {
+            if ((string)$override['PartName'] === $oldPartName) {
+                $override['PartName'] = $newPartName;
+            }
+        }
+        
+        // Update cached filename
+        $this->cachedFilename = array_map(function($name) use ($oldPath, $newPath) {
+            if ($name === $oldPath || $name === './' . $oldPath) {
+                return $newPath;
+            }
+            return $name;
+        }, $this->cachedFilename);
+        
+        // Update cache (array only, LRU cache will handle stale entries naturally)
+        if (!$this->useLRUCache) {
+            if (isset($this->cachedResources[$oldPath])) {
+                $this->cachedResources[$newPath] = $this->cachedResources[$oldPath];
+                unset($this->cachedResources[$oldPath]);
+            }
+        }
     }
 }

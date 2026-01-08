@@ -4,213 +4,230 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
-echo "🔍 COMPARAISON : Original vs Réparé par PowerPoint\n";
-echo str_repeat('=', 70) . "\n\n";
+$corruptedPath = __DIR__ . '/../test_merge.pptx';
+$repairedPath = __DIR__ . '/../test_merge_repaired.pptx';
 
-$originalFile = $argv[1] ?? __DIR__ . '/../test_merge_powerpoint.pptx';
-$repairedFile = $argv[2] ?? __DIR__ . '/../test_merge_powerpoint_repaired.pptx';
-
-if (!file_exists($originalFile)) {
-    echo "❌ Fichier original non trouvé: $originalFile\n";
+if (!file_exists($corruptedPath) || !file_exists($repairedPath)) {
+    echo "❌ Fichiers non trouvés\n";
     exit(1);
 }
 
-if (!file_exists($repairedFile)) {
-    echo "❌ Fichier réparé non trouvé: $repairedFile\n";
-    echo "💡 Veuillez réparer le fichier avec PowerPoint et le sauvegarder sous:\n";
-    echo "   $repairedFile\n";
-    exit(1);
+// Extract both files
+$corruptedDir = sys_get_temp_dir() . '/pptx_corrupted_' . uniqid();
+$repairedDir = sys_get_temp_dir() . '/pptx_repaired_' . uniqid();
+
+mkdir($corruptedDir);
+mkdir($repairedDir);
+
+$zipCorrupted = new ZipArchive();
+$zipRepaired = new ZipArchive();
+
+$zipCorrupted->open($corruptedPath);
+$zipRepaired->open($repairedPath);
+
+$zipCorrupted->extractTo($corruptedDir);
+$zipRepaired->extractTo($repairedDir);
+
+$zipCorrupted->close();
+$zipRepaired->close();
+
+echo "📦 Fichiers extraits:\n";
+echo "   Corrompu: $corruptedDir\n";
+echo "   Réparé: $repairedDir\n\n";
+
+// Compare files
+function getFilesRecursive($dir, $base = '') {
+    $files = [];
+    $items = scandir($dir);
+    foreach ($items as $item) {
+        if ($item === '.' || $item === '..') continue;
+        
+        $path = $dir . '/' . $item;
+        $relativePath = $base ? $base . '/' . $item : $item;
+        
+        if (is_dir($path)) {
+            $files = array_merge($files, getFilesRecursive($path, $relativePath));
+        } else {
+            $files[] = $relativePath;
+        }
+    }
+    return $files;
 }
 
-$original = new ZipArchive();
-$original->open($originalFile);
+$corruptedFiles = getFilesRecursive($corruptedDir);
+$repairedFiles = getFilesRecursive($repairedDir);
 
-$repaired = new ZipArchive();
-$repaired->open($repairedFile);
-
-// Compare file lists
-echo "📁 Comparaison de la structure des fichiers:\n";
-$originalFiles = [];
-for ($i = 0; $i < $original->numFiles; $i++) {
-    $originalFiles[] = $original->getNameIndex($i);
-}
-
-$repairedFiles = [];
-for ($i = 0; $i < $repaired->numFiles; $i++) {
-    $repairedFiles[] = $repaired->getNameIndex($i);
-}
-
-sort($originalFiles);
+sort($corruptedFiles);
 sort($repairedFiles);
 
-$removed = array_diff($originalFiles, $repairedFiles);
-$added = array_diff($repairedFiles, $originalFiles);
+// Find differences in file structure
+$onlyInCorrupted = array_diff($corruptedFiles, $repairedFiles);
+$onlyInRepaired = array_diff($repairedFiles, $corruptedFiles);
 
-if (empty($removed) && empty($added)) {
-    echo "   ✓ Même nombre de fichiers (" . count($originalFiles) . ")\n";
-} else {
-    if (!empty($removed)) {
-        echo "   ❌ Fichiers supprimés par PowerPoint:\n";
-        foreach ($removed as $file) {
-            echo "      - $file\n";
-        }
+if (!empty($onlyInCorrupted)) {
+    echo "🔴 Fichiers uniquement dans le corrompu:\n";
+    foreach ($onlyInCorrupted as $file) {
+        echo "   - $file\n";
     }
-    if (!empty($added)) {
-        echo "   ✅ Fichiers ajoutés par PowerPoint:\n";
-        foreach ($added as $file) {
-            echo "      + $file\n";
-        }
-    }
-}
-echo "\n";
-
-// Compare XML files content
-echo "📋 Comparaison du contenu des fichiers XML:\n";
-$commonFiles = array_intersect($originalFiles, $repairedFiles);
-$xmlDifferences = [];
-
-foreach ($commonFiles as $file) {
-    if (!str_ends_with($file, '.xml') && !str_ends_with($file, '.rels')) {
-        continue;
-    }
-    
-    $originalContent = $original->getFromName($file);
-    $repairedContent = $repaired->getFromName($file);
-    
-    if ($originalContent === $repairedContent) {
-        continue;
-    }
-    
-    // Files are different
-    $xmlDifferences[$file] = [
-        'original' => $originalContent,
-        'repaired' => $repairedContent,
-    ];
+    echo "\n";
 }
 
-if (empty($xmlDifferences)) {
-    echo "   ✓ Aucune différence dans les fichiers XML\n";
-} else {
-    echo "   ⚠️  " . count($xmlDifferences) . " fichiers XML modifiés:\n";
-    foreach (array_keys($xmlDifferences) as $file) {
-        echo "      - $file\n";
+if (!empty($onlyInRepaired)) {
+    echo "🟢 Fichiers uniquement dans le réparé:\n";
+    foreach ($onlyInRepaired as $file) {
+        echo "   - $file\n";
     }
+    echo "\n";
 }
-echo "\n";
 
-// Detailed analysis of each modified file
-if (!empty($xmlDifferences)) {
-    echo "🔬 ANALYSE DÉTAILLÉE DES MODIFICATIONS:\n";
-    echo str_repeat('=', 70) . "\n\n";
+// Compare XML files
+$xmlFiles = array_filter($corruptedFiles, function($f) {
+    return pathinfo($f, PATHINFO_EXTENSION) === 'xml' || 
+           pathinfo($f, PATHINFO_EXTENSION) === 'rels';
+});
+
+echo "📋 Comparaison des fichiers XML/RELS:\n\n";
+
+foreach ($xmlFiles as $file) {
+    if (!in_array($file, $repairedFiles)) continue;
     
-    foreach ($xmlDifferences as $file => $contents) {
-        echo "📄 $file\n";
-        echo str_repeat('-', 70) . "\n";
+    $corruptedPath = $corruptedDir . '/' . $file;
+    $repairedPath = $repairedDir . '/' . $file;
+    
+    $corruptedContent = file_get_contents($corruptedPath);
+    $repairedContent = file_get_contents($repairedPath);
+    
+    if ($corruptedContent !== $repairedContent) {
+        echo "⚠️  DIFFÉRENCE: $file\n";
         
-        // Pretty print XML for comparison
-        $originalXml = simplexml_load_string($contents['original']);
-        $repairedXml = simplexml_load_string($contents['repaired']);
-        
-        if ($originalXml === false || $repairedXml === false) {
-            echo "   ❌ Erreur de parsing XML\n\n";
-            continue;
-        }
-        
-        // Format XML for comparison
-        $dom1 = new DOMDocument('1.0');
-        $dom1->preserveWhiteSpace = false;
-        $dom1->formatOutput = true;
-        $dom1->loadXML($contents['original']);
-        $originalFormatted = $dom1->saveXML();
-        
-        $dom2 = new DOMDocument('1.0');
-        $dom2->preserveWhiteSpace = false;
-        $dom2->formatOutput = true;
-        $dom2->loadXML($contents['repaired']);
-        $repairedFormatted = $dom2->saveXML();
-        
-        // Simple line-by-line comparison
-        $originalLines = explode("\n", $originalFormatted);
-        $repairedLines = explode("\n", $repairedFormatted);
-        
-        $maxLines = max(count($originalLines), count($repairedLines));
-        $diffsFound = 0;
-        
-        for ($i = 0; $i < $maxLines && $diffsFound < 10; $i++) {
-            $origLine = $originalLines[$i] ?? '';
-            $repLine = $repairedLines[$i] ?? '';
+        // Try to parse as XML and show differences
+        try {
+            $corruptedXml = new SimpleXMLElement($corruptedContent);
+            $repairedXml = new SimpleXMLElement($repairedContent);
             
-            if (trim($origLine) !== trim($repLine)) {
-                $diffsFound++;
-                echo "\n   Ligne " . ($i + 1) . ":\n";
-                echo "   AVANT: " . trim($origLine) . "\n";
-                echo "   APRÈS: " . trim($repLine) . "\n";
+            // Compare specific elements
+            if (strpos($file, '[Content_Types].xml') !== false) {
+                echo "   Type: Content Types\n";
+                compareContentTypes($corruptedXml, $repairedXml);
+            } elseif (strpos($file, '.rels') !== false) {
+                echo "   Type: Relationships\n";
+                compareRelationships($corruptedXml, $repairedXml);
+            } elseif (strpos($file, 'presentation.xml') !== false) {
+                echo "   Type: Presentation\n";
+                comparePresentation($corruptedXml, $repairedXml);
             }
-        }
-        
-        if ($diffsFound >= 10) {
-            echo "\n   ... (plus de différences non affichées)\n";
-        }
-        
-        if ($diffsFound === 0) {
-            echo "   ℹ️  Différences mineures (whitespace, formatage)\n";
+            
+        } catch (Exception $e) {
+            echo "   Erreur de parsing XML: " . $e->getMessage() . "\n";
         }
         
         echo "\n";
     }
 }
 
-// Specific checks
-echo "🔍 VÉRIFICATIONS SPÉCIFIQUES:\n";
-echo str_repeat('=', 70) . "\n\n";
-
-// Check presentation.xml
-echo "📊 presentation.xml:\n";
-$origPres = $original->getFromName('ppt/presentation.xml');
-$repPres = $repaired->getFromName('ppt/presentation.xml');
-
-if ($origPres && $repPres) {
-    $origPresXml = simplexml_load_string($origPres);
-    $repPresXml = simplexml_load_string($repPres);
+function compareContentTypes($corrupted, $repaired) {
+    $corruptedTypes = [];
+    $repairedTypes = [];
     
-    $origPresXml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
-    $repPresXml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
-    
-    // Compare slide IDs
-    $origSlides = $origPresXml->xpath('//p:sldId');
-    $repSlides = $repPresXml->xpath('//p:sldId');
-    
-    echo "   Slides (original): ";
-    foreach ($origSlides as $slide) {
-        echo (string)$slide['id'] . " ";
+    foreach ($corrupted->Override ?? [] as $override) {
+        $corruptedTypes[(string)$override['PartName']] = (string)$override['ContentType'];
     }
-    echo "\n";
     
-    echo "   Slides (réparé):   ";
-    foreach ($repSlides as $slide) {
-        echo (string)$slide['id'] . " ";
+    foreach ($repaired->Override ?? [] as $override) {
+        $repairedTypes[(string)$override['PartName']] = (string)$override['ContentType'];
     }
-    echo "\n";
-}
-echo "\n";
-
-// Check app.xml
-echo "📋 docProps/app.xml:\n";
-$origApp = $original->getFromName('docProps/app.xml');
-$repApp = $repaired->getFromName('docProps/app.xml');
-
-if ($origApp && $repApp) {
-    $origAppXml = simplexml_load_string($origApp);
-    $repAppXml = simplexml_load_string($repApp);
     
-    echo "   Original - Slides: " . ((string)$origAppXml->Slides ?: 'N/A') . ", Notes: " . ((string)$origAppXml->Notes ?: 'N/A') . "\n";
-    echo "   Réparé   - Slides: " . ((string)$repAppXml->Slides ?: 'N/A') . ", Notes: " . ((string)$repAppXml->Notes ?: 'N/A') . "\n";
+    $onlyInCorrupted = array_diff_key($corruptedTypes, $repairedTypes);
+    $onlyInRepaired = array_diff_key($repairedTypes, $corruptedTypes);
+    
+    if (!empty($onlyInCorrupted)) {
+        echo "   🔴 ContentTypes uniquement dans corrompu:\n";
+        foreach ($onlyInCorrupted as $part => $type) {
+            echo "      - $part => $type\n";
+        }
+    }
+    
+    if (!empty($onlyInRepaired)) {
+        echo "   🟢 ContentTypes uniquement dans réparé:\n";
+        foreach ($onlyInRepaired as $part => $type) {
+            echo "      - $part => $type\n";
+        }
+    }
 }
-echo "\n";
 
-$original->close();
-$repaired->close();
+function compareRelationships($corrupted, $repaired) {
+    $corrupted->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/package/2006/relationships');
+    $repaired->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/package/2006/relationships');
+    
+    $corruptedRels = [];
+    $repairedRels = [];
+    
+    foreach ($corrupted->xpath('//r:Relationship') ?? [] as $rel) {
+        $id = (string)$rel['Id'];
+        $corruptedRels[$id] = [
+            'Type' => (string)$rel['Type'],
+            'Target' => (string)$rel['Target']
+        ];
+    }
+    
+    foreach ($repaired->xpath('//r:Relationship') ?? [] as $rel) {
+        $id = (string)$rel['Id'];
+        $repairedRels[$id] = [
+            'Type' => (string)$rel['Type'],
+            'Target' => (string)$rel['Target']
+        ];
+    }
+    
+    $onlyInCorrupted = array_diff_key($corruptedRels, $repairedRels);
+    $onlyInRepaired = array_diff_key($repairedRels, $corruptedRels);
+    
+    if (!empty($onlyInCorrupted)) {
+        echo "   🔴 Relations uniquement dans corrompu:\n";
+        foreach ($onlyInCorrupted as $id => $rel) {
+            echo "      - $id => {$rel['Type']} -> {$rel['Target']}\n";
+        }
+    }
+    
+    if (!empty($onlyInRepaired)) {
+        echo "   🟢 Relations uniquement dans réparé:\n";
+        foreach ($onlyInRepaired as $id => $rel) {
+            echo "      - $id => {$rel['Type']} -> {$rel['Target']}\n";
+        }
+    }
+    
+    // Check for differences in common relationships
+    $common = array_intersect_key($corruptedRels, $repairedRels);
+    foreach ($common as $id => $corruptedRel) {
+        $repairedRel = $repairedRels[$id];
+        if ($corruptedRel !== $repairedRel) {
+            echo "   ⚠️  Relation $id modifiée:\n";
+            echo "      Corrompu: {$corruptedRel['Type']} -> {$corruptedRel['Target']}\n";
+            echo "      Réparé:   {$repairedRel['Type']} -> {$repairedRel['Target']}\n";
+        }
+    }
+}
 
-echo str_repeat('=', 70) . "\n";
-echo "✅ Comparaison terminée\n";
-echo "\n💡 Analysez les différences ci-dessus pour identifier ce que PowerPoint a corrigé.\n";
+function comparePresentation($corrupted, $repaired) {
+    $corrupted->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+    $repaired->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+    
+    $corruptedSlides = $corrupted->xpath('//p:sldIdLst/p:sldId') ?? [];
+    $repairedSlides = $repaired->xpath('//p:sldIdLst/p:sldId') ?? [];
+    
+    echo "   Slides: " . count($corruptedSlides) . " (corrompu) vs " . count($repairedSlides) . " (réparé)\n";
+    
+    $corruptedMasters = $corrupted->xpath('//p:sldMasterIdLst/p:sldMasterId') ?? [];
+    $repairedMasters = $repaired->xpath('//p:sldMasterIdLst/p:sldMasterId') ?? [];
+    
+    echo "   Masters: " . count($corruptedMasters) . " (corrompu) vs " . count($repairedMasters) . " (réparé)\n";
+    
+    $corruptedNotesMasters = $corrupted->xpath('//p:notesMasterIdLst/p:notesMasterId') ?? [];
+    $repairedNotesMasters = $repaired->xpath('//p:notesMasterIdLst/p:notesMasterId') ?? [];
+    
+    echo "   Notes Masters: " . count($corruptedNotesMasters) . " (corrompu) vs " . count($repairedNotesMasters) . " (réparé)\n";
+}
+
+echo "✅ Analyse terminée\n";
+echo "\n📁 Répertoires temporaires conservés pour inspection manuelle:\n";
+echo "   Corrompu: $corruptedDir\n";
+echo "   Réparé: $repairedDir\n";
