@@ -321,15 +321,29 @@ class PPTX
 
         // If force clone is requested, skip reuse checks
         if (!$forceClone) {
-            // Check for image deduplication
-            if ($originalResource instanceof Image && $this->config->isEnabled('deduplicate_images')) {
-                $duplicate = $this->imageCache->findDuplicate($originalResource->getContent());
-                if ($duplicate !== null) {
-                    if ($this->config->isEnabled('collect_stats')) {
-                        $this->stats->recordDeduplication();
-                    }
+            // Check for image deduplication using content hash
+            if ($originalResource instanceof Image) {
+                $content = $originalResource->getContent();
 
-                    return $duplicate;
+                // Check image cache first (fast in-memory lookup)
+                if ($this->config->isEnabled('deduplicate_images')) {
+                    $duplicate = $this->imageCache->findDuplicate($content);
+                    if ($duplicate !== null) {
+                        if ($this->config->isEnabled('collect_stats')) {
+                            $this->stats->recordDeduplication();
+                        }
+                        return $duplicate;
+                    }
+                }
+
+                // Then check for existing similar file in archive (slower: requires ZIP access)
+                $existingResource = $this->getContentType()->lookForSimilarFile($originalResource);
+                if ($existingResource !== null) {
+                    // Register in cache for future lookups
+                    if ($existingResource instanceof Image) {
+                        $this->imageCache->registerWithContent($existingResource->getContent(), $existingResource);
+                    }
+                    return $existingResource;
                 }
             }
 
@@ -749,7 +763,7 @@ class PPTX
      *
      * IMPORTANT: SlideLayouts referenced by SlideMasters are KEPT even if not used by slides.
      * PowerPoint requires SlideMasters to have valid layout references.
-     * Only removes revisionInfo.xml which can cause corruption.
+     * Removes revisionInfo.xml and unreferenced media files.
      */
     protected function cleanOrphanedResources(): void
     {
@@ -760,6 +774,89 @@ class PPTX
             $this->removeFromContentTypes($revisionInfo);
             $this->removeRevisionInfoFromPresentationRels();
         }
+        
+        // Clean orphaned media files
+        $this->cleanOrphanedMedia();
+    }
+    
+    /**
+     * Remove media files that are not referenced in any .rels file.
+     */
+    protected function cleanOrphanedMedia(): void
+    {
+        // Collect all media files in the archive
+        $mediaFiles = [];
+        for ($i = 0; $i < $this->archive->numFiles; $i++) {
+            $filename = $this->archive->getNameIndex($i);
+            if ($filename !== false && str_starts_with($filename, 'ppt/media/')) {
+                $mediaFiles[$filename] = true;
+            }
+        }
+
+        if (empty($mediaFiles)) {
+            return;
+        }
+
+        // Collect all referenced media from .rels files
+        $referencedMedia = [];
+        for ($i = 0; $i < $this->archive->numFiles; $i++) {
+            $filename = $this->archive->getNameIndex($i);
+            if ($filename !== false && str_ends_with($filename, '.rels')) {
+                $content = $this->archive->getFromName($filename);
+                if ($content !== false) {
+                    $relsDir = dirname(dirname($filename)); // e.g., ppt/slides from ppt/slides/_rels/slide1.xml.rels
+                    if (preg_match_all('/Target="([^"]+)"/', $content, $matches)) {
+                        foreach ($matches[1] as $target) {
+                            // Resolve relative path
+                            $resolvedPath = $this->resolveRelativeMediaPath($relsDir, $target);
+                            if ($resolvedPath !== null && str_starts_with($resolvedPath, 'ppt/media/')) {
+                                $referencedMedia[$resolvedPath] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Remove unreferenced media
+        foreach ($mediaFiles as $mediaPath => $unused) {
+            if (!isset($referencedMedia[$mediaPath])) {
+                $this->archive->deleteName($mediaPath);
+            }
+        }
+    }
+    
+    /**
+     * Resolve a relative target path from a .rels file to an absolute path.
+     *
+     * @param string $baseDir The directory containing the .rels source file (e.g., ppt/slides)
+     * @param string $target The relative target (e.g., ../media/image1.png)
+     * @return string|null The resolved absolute path, or null if external
+     */
+    protected function resolveRelativeMediaPath(string $baseDir, string $target): ?string
+    {
+        // Skip external targets
+        if (str_starts_with($target, 'http://') || str_starts_with($target, 'https://')) {
+            return null;
+        }
+        
+        // Handle absolute paths
+        if (str_starts_with($target, '/')) {
+            return ltrim($target, '/');
+        }
+        
+        // Resolve relative path
+        $parts = explode('/', $baseDir . '/' . $target);
+        $resolved = [];
+        foreach ($parts as $part) {
+            if ($part === '..') {
+                array_pop($resolved);
+            } elseif ($part !== '' && $part !== '.') {
+                $resolved[] = $part;
+            }
+        }
+        
+        return implode('/', $resolved);
     }
     
     /**

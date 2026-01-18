@@ -35,7 +35,7 @@ class OptimizationConfig
         // Performance
         'lazy_loading' => true,
         'cache_size' => 100,
-        'deduplicate_images' => false,
+        'deduplicate_images' => true, // ENABLED: Critical for merge operations to avoid duplicate media
         'use_lru_cache' => true,
 
         // Batch processing

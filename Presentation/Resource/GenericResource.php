@@ -270,11 +270,14 @@ class GenericResource implements ResourceInterface
     }
 
     /**
-     * Get the hash of the file content.
+     * Get the hash of the file content using SHA256.
+     *
+     * Uses SHA256 for robust deduplication (consistent with ImageCache).
+     * Critical for merge operations to detect identical resources.
      */
     public function getHashFile(): string
     {
-        return md5($this->getContent());
+        return hash('sha256', $this->getContent());
     }
 
     /**

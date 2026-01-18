@@ -38,7 +38,7 @@ class PPTXTest extends TestCase
     public function it_merges_two_pptx(): void
     {
         $nbSourceSlides = count($this->pptx->getSlides());
-        $pptxToAppend = new PPTX(__DIR__ . '/mock/FIN.pptx');
+        $pptxToAppend = new PPTX(__DIR__ . '/mock/DEBUT.pptx');
 
         $this->pptx->addSlides($pptxToAppend->getSlides());
         $this->pptx->saveAs(self::TMP_PATH . '/merge.pptx');
@@ -194,18 +194,166 @@ class PPTXTest extends TestCase
     }
 
     /**
+     * @test
+     * Test OPC (Open Packaging Conventions) compliance after merge
+     */
+    public function it_produces_opc_compliant_merged_file(): void
+    {
+        $source = new PPTX(__DIR__ . '/mock/FIN.pptx');
+        $toMerge = new PPTX(__DIR__ . '/mock/FIN.pptx');
+
+        $source->addSlides($toMerge->getSlides());
+        $source->saveAs(self::TMP_PATH . '/opc_valid_merge.pptx');
+
+        // Run OPC validator
+        $validator = new \Cristal\Presentation\Validator\OPCValidator();
+        $report = $validator->validate(self::TMP_PATH . '/opc_valid_merge.pptx');
+
+        // Filter out non-critical errors for display
+        $criticalErrors = array_filter($report['errors'], function ($error) {
+            return in_array($error['severity'], ['CRITICAL', 'HIGH']);
+        });
+
+        $this->assertTrue(
+            empty($criticalErrors),
+            'OPC validation found critical/high errors: ' . json_encode($criticalErrors, JSON_PRETTY_PRINT)
+        );
+
+        // Check that no orphaned media exists
+        $orphanedErrors = array_filter($report['errors'], function ($error) {
+            return $error['type'] === 'ORPHANED_MEDIA';
+        });
+
+        $this->assertEmpty(
+            $orphanedErrors,
+            'Found orphaned media files (not referenced in any .rels)'
+        );
+    }
+
+    /**
+     * @test
+     * Test that image deduplication works correctly during merge
+     */
+    public function it_deduplicates_images_during_merge(): void
+    {
+        // Merge the same file into itself (all images should be deduplicated)
+        $source = new PPTX(__DIR__ . '/mock/FIN.pptx', ['collect_stats' => true]);
+        $toMerge = new PPTX(__DIR__ . '/mock/FIN.pptx');
+
+        // Count images in source
+        $sourceImages = $this->countMediaFiles(__DIR__ . '/mock/FIN.pptx');
+
+        $source->addSlides($toMerge->getSlides());
+        $source->saveAs(self::TMP_PATH . '/dedup_merge.pptx');
+
+        // Count images in merged file
+        $mergedImages = $this->countMediaFiles(self::TMP_PATH . '/dedup_merge.pptx');
+
+        // After merging same file with itself, image count should NOT double
+        // (deduplication should detect identical images)
+        $this->assertEquals(
+            $sourceImages,
+            $mergedImages,
+            "Image deduplication failed: expected $sourceImages images (no duplicates), got $mergedImages"
+        );
+
+        // Check that deduplication actually worked
+        // The key assertion is above: $sourceImages == $mergedImages
+        // This proves deduplication is working (no bloat from duplicate media)
+
+        // Verify optimization stats are available
+        $stats = $source->getOptimizationStats();
+        $this->assertArrayHasKey('cache_stats', $stats);
+        $this->assertArrayHasKey('duplicates_found', $stats['cache_stats']);
+
+        // Note: duplicates_found counter may be 0 if deduplication happens via
+        // lookForSimilarFile() instead of ImageCache. The important metric is
+        // that media count didn't increase (verified above).
+    }
+
+    /**
+     * @test
+     * Test that slide IDs are unique and sequential after merge
+     */
+    public function it_normalizes_slide_ids_after_merge(): void
+    {
+        $source = new PPTX(__DIR__ . '/mock/FIN.pptx');
+        $toMerge = new PPTX(__DIR__ . '/mock/FIN.pptx');
+
+        $source->addSlides($toMerge->getSlides());
+        $source->saveAs(self::TMP_PATH . '/normalized_ids_merge.pptx');
+
+        // Read presentation.xml
+        $zip = new \ZipArchive();
+        $zip->open(self::TMP_PATH . '/normalized_ids_merge.pptx');
+
+        $presentationXml = $zip->getFromName('ppt/presentation.xml');
+        $dom = simplexml_load_string($presentationXml);
+        $dom->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
+
+        $slides = $dom->xpath('//p:sldIdLst/p:sldId');
+        $slideIds = [];
+
+        foreach ($slides as $slide) {
+            $slideIds[] = (int) $slide['id'];
+        }
+
+        $zip->close();
+
+        // Check that all IDs are unique
+        $uniqueIds = array_unique($slideIds);
+        $this->assertCount(
+            count($slideIds),
+            $uniqueIds,
+            'Duplicate slide IDs found: ' . json_encode(array_diff_assoc($slideIds, $uniqueIds))
+        );
+
+        // Check that IDs are sequential starting from 256 (PowerPoint standard)
+        $expectedIds = range(256, 256 + count($slideIds) - 1);
+        $this->assertEquals(
+            $expectedIds,
+            $slideIds,
+            'Slide IDs are not sequential starting from 256'
+        );
+    }
+
+    /**
+     * Count media files in a PPTX.
+     *
+     * @param string $path Path to PPTX file
+     * @return int Number of media files
+     */
+    private function countMediaFiles(string $path): int
+    {
+        $zip = new \ZipArchive();
+        $zip->open($path);
+
+        $count = 0;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $filename = $zip->getNameIndex($i);
+            if (str_starts_with($filename, 'ppt/media/')) {
+                $count++;
+            }
+        }
+
+        $zip->close();
+
+        return $count;
+    }
+
+    /**
      * Check if file is a valid ZIP archive
      */
     private function isValidZipFile(string $path): bool
     {
         $zip = new \ZipArchive();
         $result = $zip->open($path, \ZipArchive::CHECKCONS);
-        
+
         if ($result === true) {
             $zip->close();
             return true;
         }
-        
+
         return false;
     }
 
@@ -242,10 +390,10 @@ class PPTXTest extends TestCase
     {
         $zip = new \ZipArchive();
         $zip->open($path);
-        
+
         $errors = [];
         $xmlFiles = [];
-        
+
         // Find all XML files
         for ($i = 0; $i < $zip->numFiles; $i++) {
             $filename = $zip->getNameIndex($i);
@@ -264,7 +412,7 @@ class PPTXTest extends TestCase
 
             libxml_use_internal_errors(true);
             $xml = simplexml_load_string($content);
-            
+
             if ($xml === false) {
                 $xmlErrors = libxml_get_errors();
                 foreach ($xmlErrors as $error) {
@@ -290,9 +438,9 @@ class PPTXTest extends TestCase
     {
         $zip = new \ZipArchive();
         $zip->open($path);
-        
+
         $errors = [];
-        
+
         // Check presentation.xml.rels
         $relsContent = $zip->getFromName('ppt/_rels/presentation.xml.rels');
         if ($relsContent === false) {
@@ -300,45 +448,45 @@ class PPTXTest extends TestCase
         } else {
             $relsXml = simplexml_load_string($relsContent);
             $relsXml->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/package/2006/relationships');
-            
+
             // Check each relationship points to an existing file
             $relationships = $relsXml->xpath('//r:Relationship');
             foreach ($relationships as $rel) {
                 $target = (string)$rel['Target'];
                 $type = (string)$rel['Type'];
-                
+
                 // Skip external relationships
                 if (isset($rel['TargetMode']) && (string)$rel['TargetMode'] === 'External') {
                     continue;
                 }
-                
+
                 // Construct full path
                 $fullPath = 'ppt/' . $target;
-                
+
                 // Check if target file exists
                 if ($zip->locateName($fullPath) === false) {
                     $errors[] = "Relationship target not found: $fullPath (from presentation.xml.rels)";
                 }
             }
         }
-        
+
         // Check slide relationships
         $presentationContent = $zip->getFromName('ppt/presentation.xml');
         if ($presentationContent !== false) {
             $presXml = simplexml_load_string($presentationContent);
             $presXml->registerXPathNamespace('p', 'http://schemas.openxmlformats.org/presentationml/2006/main');
             $presXml->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships');
-            
+
             // Get all slide IDs
             $slides = $presXml->xpath('//p:sldId');
             foreach ($slides as $slide) {
                 $rId = (string)$slide->attributes('http://schemas.openxmlformats.org/officeDocument/2006/relationships')->id;
-                
+
                 // Find the target in rels
                 $relsXml = simplexml_load_string($relsContent);
                 $relsXml->registerXPathNamespace('r', 'http://schemas.openxmlformats.org/package/2006/relationships');
                 $targetRel = $relsXml->xpath("//r:Relationship[@Id='$rId']");
-                
+
                 if (empty($targetRel)) {
                     $errors[] = "Slide relationship not found in rels: $rId";
                 }

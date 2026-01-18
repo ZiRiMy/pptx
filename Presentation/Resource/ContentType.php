@@ -318,18 +318,16 @@ class ContentType extends GenericResource
             return null;
         }
         
-        // For other resources (images, media, etc.): only compare if from same document
-        // to avoid loading content from external archives
-        if ($originalResource->getDocument() !== $this->document) {
-            return null;
-        }
-        
+        // For other resources (images, media, etc.): compare by content hash
+        // This enables deduplication of identical media files during merge operations
+        $originalHash = $originalResource->getHashFile();
         $startBy = dirname($originalResource->getTarget()) . '/';
+        
         foreach ($this->cachedFilename as $path) {
             if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
                 $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
                 if ($existingFile instanceof GenericResource
-                    && $existingFile->getHashFile() === $originalResource->getHashFile()) {
+                    && $existingFile->getHashFile() === $originalHash) {
                     return $existingFile;
                 }
             }
