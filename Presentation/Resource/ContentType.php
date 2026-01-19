@@ -326,9 +326,16 @@ class ContentType extends GenericResource
         foreach ($this->cachedFilename as $path) {
             if (str_starts_with($path, $startBy) && dirname($path) . '/' === $startBy) {
                 $existingFile = $this->getResource($path, $originalResource->getRelType(), false, true);
-                if ($existingFile instanceof GenericResource
-                    && $existingFile->getHashFile() === $originalHash) {
-                    return $existingFile;
+                if ($existingFile instanceof GenericResource) {
+                    try {
+                        // Try to get hash - may fail if file was removed from archive
+                        if ($existingFile->getHashFile() === $originalHash) {
+                            return $existingFile;
+                        }
+                    } catch (\RuntimeException $e) {
+                        // File no longer exists in archive (stale cache entry), skip it
+                        continue;
+                    }
                 }
             }
         }

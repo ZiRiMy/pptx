@@ -77,7 +77,7 @@ class GenericResource implements ResourceInterface
     protected function loadContent(): string
     {
         $content = $this->initialDocument->getArchive()->getFromName($this->getInitialTarget());
-        
+
         if ($content === false) {
             throw new \RuntimeException(
                 sprintf(
