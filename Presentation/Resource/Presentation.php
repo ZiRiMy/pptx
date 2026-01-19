@@ -140,6 +140,185 @@ class Presentation extends XmlResource
     }
 
     /**
+     * Rebuild sections from slide metadata after merge.
+     * This method should be called AFTER all slides have been added to ensure
+     * slide IDs are finalized.
+     */
+    public function rebuildSectionsFromSlides(): void
+    {
+        $this->mapResources();
+
+        // Collect sections from all slides
+        $sections = [];  // ['sectionName' => ['guid' => 'xxx', 'slideIds' => [...]]]
+
+        // Get all slides in order
+        $slideIds = $this->content->xpath('p:sldIdLst/p:sldId');
+
+        foreach ($slideIds as $sldIdNode) {
+            $slideId = (int)$sldIdNode['id'];
+            $rId = (string)$sldIdNode->attributes($this->namespaces['r'])->id;
+
+            // Get the slide resource
+            if (!isset($this->resources[$rId])) {
+                continue;
+            }
+
+            $slide = $this->resources[$rId];
+            if (!($slide instanceof Slide)) {
+                continue;
+            }
+
+            // Get section info from slide
+            $sectionInfo = $slide->getSourceSection();
+            if ($sectionInfo === null) {
+                continue;
+            }
+
+            $sectionName = $sectionInfo['name'];
+            $sectionGuid = $sectionInfo['id'];
+
+            // Add slide to section
+            if (!isset($sections[$sectionName])) {
+                $sections[$sectionName] = [
+                    'guid' => $sectionGuid,
+                    'slideIds' => []
+                ];
+            }
+
+            $sections[$sectionName]['slideIds'][] = $slideId;
+        }
+
+        // If no sections, nothing to do
+        if (empty($sections)) {
+            return;
+        }
+
+        // Remove old sections
+        $this->removeSections();
+
+        // Register p14 namespace
+        $this->content->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+        // Create extLst if it doesn't exist
+        $extLst = $this->content->xpath('p:extLst');
+        if (empty($extLst)) {
+            $extLst = $this->content->addChild('p:extLst');
+        } else {
+            $extLst = $extLst[0];
+        }
+
+        // Create ext element for sections
+        $ext = $extLst->addChild('ext', null, 'http://schemas.openxmlformats.org/presentationml/2006/main');
+        $ext->addAttribute('uri', '{521415D9-36F7-43E2-AB2F-B90AF26B5E84}');
+
+        // Create sectionLst
+        $sectionLst = $ext->addChild('p14:sectionLst', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+        // Add each section
+        foreach ($sections as $sectionName => $sectionData) {
+            $section = $sectionLst->addChild('section', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+            $section->addAttribute('name', $sectionName);
+            $section->addAttribute('id', $sectionData['guid']);
+
+            // Add sldIdLst to section
+            $sldIdLst = $section->addChild('sldIdLst', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+            // Add all slide IDs to this section
+            foreach ($sectionData['slideIds'] as $slideId) {
+                $sldId = $sldIdLst->addChild('sldId', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+                $sldId->addAttribute('id', (string)$slideId);
+            }
+        }
+    }
+
+    /**
+     * Rebuild sections from collected section data (survives refreshSource).
+     * This method uses pre-collected section data instead of relying on in-memory slide metadata.
+     *
+     * @param array $sectionData Array mapping source slide IDs to section info ['name' => ..., 'id' => ...]
+     */
+    public function rebuildSectionsFromCollectedData(array $sectionData): void
+    {
+        if (empty($sectionData)) {
+            return;
+        }
+
+        // Get all slides in order from presentation.xml
+        $slideNodes = $this->content->xpath('p:sldIdLst/p:sldId');
+
+        // Build array of final slide IDs in order
+        $finalSlideIds = [];
+        foreach ($slideNodes as $sldIdNode) {
+            $finalSlideIds[] = (int)$sldIdNode['id'];
+        }
+
+        // Collect sections - map slides by index (sectionData keys are now indices 0, 1, 2...)
+        $sections = [];  // ['sectionName' => ['guid' => 'xxx', 'slideIds' => [...]]]
+
+        foreach ($sectionData as $index => $sectionInfo) {
+            // Skip if we don't have a corresponding final slide
+            if (!isset($finalSlideIds[$index])) {
+                continue;
+            }
+
+            $finalSlideId = $finalSlideIds[$index];
+            $sectionName = $sectionInfo['name'];
+            $sectionGuid = $sectionInfo['id'];
+
+            // Add slide to section
+            if (!isset($sections[$sectionName])) {
+                $sections[$sectionName] = [
+                    'guid' => $sectionGuid,
+                    'slideIds' => []
+                ];
+            }
+
+            $sections[$sectionName]['slideIds'][] = $finalSlideId;
+        }
+
+        if (empty($sections)) {
+            return;
+        }
+
+        // Remove old sections
+        $this->removeSections();
+
+        // Register p14 namespace
+        $this->content->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+        // Create extLst if it doesn't exist
+        $extLst = $this->content->xpath('p:extLst');
+        if (empty($extLst)) {
+            $extLst = $this->content->addChild('p:extLst');
+        } else {
+            $extLst = $extLst[0];
+        }
+
+        // Create ext element for sections
+        $ext = $extLst->addChild('ext', null, 'http://schemas.openxmlformats.org/presentationml/2006/main');
+        $ext->addAttribute('uri', '{521415D9-36F7-43E2-AB2F-B90AF26B5E84}');
+
+        // Create sectionLst
+        $sectionLst = $ext->addChild('p14:sectionLst', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+        // Add each section
+        foreach ($sections as $sectionName => $sectionData) {
+            $section = $sectionLst->addChild('section', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+            $section->addAttribute('name', $sectionName);
+            $section->addAttribute('id', $sectionData['guid']);
+
+            // Add sldIdLst to section
+            $sldIdLst = $section->addChild('sldIdLst', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+            // Add all slide IDs to this section
+            foreach ($sectionData['slideIds'] as $slideId) {
+                $sldId = $sldIdLst->addChild('sldId', null, 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+                $sldId->addAttribute('id', (string)$slideId);
+            }
+        }
+    }
+
+    /**
      * Add a slide to a section in the sectionLst.
      * Creates the section if it doesn't exist.
      *

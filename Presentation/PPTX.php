@@ -547,11 +547,45 @@ class PPTX
      */
     public function addSlides(array $slides): self
     {
+        // Collect section information from BOTH existing slides and new slides
+        // (so it survives refreshSource cycles)
+        $sectionData = $this->collectSectionData(array_merge($this->slides, $slides));
+
         foreach ($slides as $slide) {
             $this->addSlide($slide);
         }
 
+        // Rebuild sections using the collected data
+        $this->presentation->rebuildSectionsFromCollectedData($sectionData);
+
         return $this;
+    }
+
+    /**
+     * Collect section information from slides before they're processed.
+     * This preserves section data through save/refresh cycles.
+     *
+     * @param Slide[] $slides
+     * @return array Array mapping slide source IDs to section info
+     */
+    protected function collectSectionData(array $slides): array
+    {
+        $sectionData = [];
+
+        // Use sequential index instead of sourceSlideId to handle duplicate IDs
+        // when merging the same presentation multiple times
+        $index = 0;
+        foreach ($slides as $slide) {
+            $sectionInfo = $slide->getSourceSection();
+
+            if ($sectionInfo !== null) {
+                $sectionData[$index] = $sectionInfo;
+            }
+
+            $index++;
+        }
+
+        return $sectionData;
     }
 
     /**
@@ -589,6 +623,9 @@ class PPTX
 
         // Save and refresh once at the end
         if ($addedCount > 0) {
+            // Rebuild sections from slide metadata after all slides are added
+            $this->presentation->rebuildSectionsFromSlides();
+
             $this->presentation->save();
             $this->contentType->save();
 

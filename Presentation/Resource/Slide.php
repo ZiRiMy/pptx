@@ -67,6 +67,19 @@ class Slide extends XmlResource
     }
 
     /**
+     * Preserve section metadata when cloning slides.
+     * This ensures section information is maintained during merge operations.
+     */
+    public function __clone()
+    {
+        // Preserve section metadata
+        // Note: These are already copied by default shallow clone,
+        // but we make it explicit for clarity
+        // $this->sourceSection is already copied (array)
+        // $this->sourceSlideId is already copied (int)
+    }
+
+    /**
      * Template name for table row replacement.
      */
     protected const TABLE_ROW_TEMPLATE_NAME = 'replaceByNewRow';
