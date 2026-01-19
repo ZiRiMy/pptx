@@ -278,10 +278,13 @@ class XmlResource extends GenericResource
      */
     protected function performSave(): void
     {
+        // CRITICAL: Load resources BEFORE resetIds() to ensure they're preserved
+        $this->mapResources();
+
         $this->resetIds();
         parent::performSave();
 
-        if (count($this->getResources()) === 0) {
+        if (count($this->resources) === 0) {
             return;
         }
 

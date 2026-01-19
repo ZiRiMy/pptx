@@ -12,6 +12,11 @@ use Cristal\Presentation\ResourceInterface;
 class Presentation extends XmlResource
 {
     /**
+     * Track if sections have been removed to avoid repeated removal
+     */
+    private static bool $sectionsRemoved = false;
+
+    /**
      * Add a resource to the presentation.
      *
      * @param ResourceInterface $resource Resource to add
@@ -19,21 +24,30 @@ class Presentation extends XmlResource
      */
     public function addResource(ResourceInterface $resource): ?string
     {
+        // Remove sections on first slide addition to avoid incorrect ordering
+        if ($resource instanceof Slide && !self::$sectionsRemoved) {
+            $this->removeSections();
+            self::$sectionsRemoved = true;
+        }
+
         if ($resource instanceof NoteMaster) {
-            // Check if this NoteMaster is already registered
-            $existingRId = $this->findExistingResourceId($resource);
-            if ($existingRId !== null) {
-                return $existingRId;
+            // PowerPoint only supports ONE NoteMaster per presentation
+            // Check if a notesMaster already exists and reuse it
+            $existing = $this->content->xpath('p:notesMasterIdLst/p:notesMasterId/@r:id');
+            if (!empty($existing)) {
+                // NoteMaster already exists, return its rId
+                return (string)$existing[0];
             }
 
+            // No NoteMaster exists yet, add this one
             $rId = parent::addResource($resource);
-            
+
             // Create notesMasterIdLst if it doesn't exist
             if (!count($this->content->xpath('p:notesMasterIdLst'))) {
                 $this->content->addChild('p:notesMasterIdLst');
             }
-            
-            // Always add the notesMasterId to the list
+
+            // Add the notesMasterId to the list
             $ref = $this->content->xpath('p:notesMasterIdLst')[0]->addChild('notesMasterId');
             $ref->addAttribute('r:id', $rId, $this->namespaces['r']);
 
@@ -41,23 +55,38 @@ class Presentation extends XmlResource
         }
 
         if ($resource instanceof Slide) {
-            $rId = parent::addResource($resource);
+            // CRITICAL: Slides must have consecutive rIds (rId2, rId3, rId4...)
+            // Find the next available rId specifically for slides
+            $rId = $this->getNextSlideRId();
+
+            // Manually add to resources array (bypass parent::addResource which uses max+1)
+            $this->resources[$rId] = $resource;
 
             $currentSlides = $this->content->xpath('p:sldIdLst/p:sldId');
 
-            // PowerPoint slide IDs must be sequential starting from 256
-            // Calculate the next sequential ID based on the number of existing slides
-            $nextId = 256 + count($currentSlides);
+            // PowerPoint slide IDs must be unique and >= 256
+            // Find the maximum existing ID and increment it
+            $maxId = 255; // Minimum value is 256
+            foreach ($currentSlides as $slide) {
+                $existingId = (int)$slide['id'];
+                if ($existingId > $maxId) {
+                    $maxId = $existingId;
+                }
+            }
+            $nextId = $maxId + 1;
 
             $ref = $this->content->xpath('p:sldIdLst')[0]->addChild('sldId');
             $ref->addAttribute('id', (string) $nextId);
             $ref->addAttribute('r:id', $rId, $this->namespaces['r']);
 
-            // Add slide to section if it has source section info
-            $sourceSection = $resource->getSourceSection();
-            if ($sourceSection !== null) {
-                $this->addSlideToSection($nextId, $sourceSection['name'], $sourceSection['id']);
-            }
+            // DISABLED: Section copying during merge causes incorrect slide order in sections
+            // Sections are organizational features that should be recreated manually after merge
+            // The problem is that slides are added to sections in processing order, not final order
+            // TODO: Implement proper section reconstruction after all slides are added
+            // $sourceSection = $resource->getSourceSection();
+            // if ($sourceSection !== null) {
+            //     $this->addSlideToSection($nextId, $sourceSection['name'], $sourceSection['id']);
+            // }
 
             return $rId;
         }
@@ -86,7 +115,28 @@ class Presentation extends XmlResource
             return $rId;
         }
 
-        return null;
+        // For all other resources (presProps, viewProps, theme, tableStyles, etc.),
+        // use the parent's generic addResource() to register them in the .rels file
+        return parent::addResource($resource);
+    }
+
+    /**
+     * Remove all sections from the presentation.
+     * Sections become invalid when merging presentations, so they should be removed.
+     */
+    protected function removeSections(): void
+    {
+        // Register p14 namespace
+        $this->content->registerXPathNamespace('p14', 'http://schemas.microsoft.com/office/powerpoint/2010/main');
+
+        // Find the ext element containing sectionLst
+        $extElements = $this->content->xpath('//p:ext[@uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}"]');
+
+        if (!empty($extElements)) {
+            // Remove this ext element (contains sections)
+            $dom = dom_import_simplexml($extElements[0]);
+            $dom->parentNode->removeChild($dom);
+        }
     }
 
     /**
@@ -138,6 +188,56 @@ class Presentation extends XmlResource
     }
 
     /**
+     * Get the next available rId for a slide.
+     * Slides should have consecutive rIds, but must not collide with other resources.
+     *
+     * @return string The next available rId for a slide (e.g., 'rId2', 'rId3', 'rId4'...)
+     */
+    private function getNextSlideRId(): string
+    {
+        $this->mapResources();
+
+        // Get all existing rIds (slides and non-slides)
+        $allUsedIds = [];
+        foreach ($this->resources as $rId => $resource) {
+            $allUsedIds[] = (int)str_replace('rId', '', $rId);
+        }
+
+        // Find all existing slide rIds
+        $slideRIds = [];
+        foreach ($this->resources as $rId => $resource) {
+            if ($resource instanceof Slide) {
+                $slideRIds[] = (int)str_replace('rId', '', $rId);
+            }
+        }
+
+        // Start from rId2 (rId1 is usually slideMaster)
+        $nextId = 2;
+
+        // Try to find the next consecutive rId for slides
+        // but skip any rId that's already in use by ANY resource
+        sort($slideRIds);
+        foreach ($slideRIds as $existingId) {
+            if ($existingId == $nextId && !in_array($nextId, $allUsedIds, true)) {
+                $nextId++;
+            } else if (in_array($nextId, $allUsedIds, true)) {
+                // This rId is used by another resource, skip it
+                $nextId++;
+            } else {
+                // Found a gap in slide sequence
+                break;
+            }
+        }
+
+        // Final check: ensure the proposed rId is not in use
+        while (in_array($nextId, $allUsedIds, true)) {
+            $nextId++;
+        }
+
+        return 'rId' . $nextId;
+    }
+
+    /**
      * Find if a resource is already registered in this presentation.
      * Used to avoid duplicating structural resources (Masters, Themes, etc.).
      *
@@ -147,7 +247,7 @@ class Presentation extends XmlResource
     private function findExistingResourceId(ResourceInterface $resource): ?string
     {
         $this->mapResources();
-        
+
         // For GenericResource, compare by target path to detect reused resources
         if ($resource instanceof GenericResource) {
             foreach ($this->resources as $rId => $existingResource) {
@@ -157,14 +257,14 @@ class Presentation extends XmlResource
                 }
             }
         }
-        
+
         // For other resources, compare by reference (original behavior)
         foreach ($this->resources as $rId => $existingResource) {
             if ($existingResource === $resource) {
                 return $rId;
             }
         }
-        
+
         return null;
     }
 }

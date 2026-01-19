@@ -253,57 +253,21 @@ class PPTX
     }
     
     /**
-     * Synchronize NoteSlide numbering with their parent Slide.
-     * NoteSlides must have the same number as their slide (slide15 -> notesSlide15).
+     * Synchronize NoteSlide references.
+     *
+     * Note: NoteSlides are automatically renamed to sequential numbers (notesSlide1, notesSlide2...)
+     * by cloneOrReuseResource() via findAvailableName(). No additional renaming is needed here.
+     * This method is kept for potential future reference synchronization logic.
      *
      * @param array<string, ResourceInterface> $clonedResources
      * @param GenericResource $rootResource The root resource being processed (usually a Slide)
      */
     protected function synchronizeNoteSlideNumbering(array $clonedResources, GenericResource $rootResource): void
     {
-        // Only process if the root resource is a Slide
-        if (!$rootResource instanceof Slide) {
-            return;
-        }
-        
-        // Find the cloned slide and its number
-        $clonedSlide = null;
-        foreach ($clonedResources as $resource) {
-            if ($resource instanceof Slide) {
-                $clonedSlide = $resource;
-                break;
-            }
-        }
-        
-        if ($clonedSlide === null) {
-            return;
-        }
-        
-        // Extract slide number from slide filename (e.g., slide15.xml -> 15)
-        if (!preg_match('#/slide(\d+)\.xml$#', $clonedSlide->getTarget(), $slideMatches)) {
-            return;
-        }
-        
-        $slideNumber = $slideMatches[1];
-        
-        // Find and rename the NoteSlide to match the slide number
-        foreach ($clonedResources as $resource) {
-            if ($resource instanceof NoteSlide && $resource instanceof GenericResource) {
-                $oldTarget = $resource->getTarget();
-                $expectedName = "notesSlide{$slideNumber}.xml";
-                $newTarget = dirname($oldTarget) . '/' . $expectedName;
-                
-                // Only update if path changed
-                if ($oldTarget !== $newTarget) {
-                    // Update ContentType with new path
-                    $this->contentType->updateResourcePath($oldTarget, $newTarget);
-                    
-                    // Rename the resource
-                    $resource->rename($expectedName);
-                }
-                break;
-            }
-        }
+        // NoteSlides are already correctly numbered by cloneOrReuseResource()
+        // using findAvailableName() which ensures sequential numbering.
+        // No action needed here.
+        return;
     }
 
     /**
@@ -470,22 +434,44 @@ class PPTX
 
     /**
      * Register resources with presentation and track slides.
+     * CRITICAL: Add resources in the correct order to ensure OPC compliance.
+     * Slides MUST be added first, then system resources (masters, props, themes).
      *
      * @param array<string, ResourceInterface> $clonedResources
      * @param GenericResource $originalResource
      */
     protected function registerResourcesWithPresentation(array $clonedResources, GenericResource $originalResource): void
     {
+        // Separate resources by type to control registration order
+        $slides = [];
+        $otherResources = [];
+
         foreach ($clonedResources as $originalTarget => $resource) {
-            // Only add resources that were actually cloned (new resources)
-            // Skip resources that were reused (already exist in the presentation)
-            if ($resource instanceof GenericResource && !$this->isResourceAlreadyInPresentation($resource)) {
-                $this->presentation->addResource($resource);
+            // Only consider resources that need to be added (not already in presentation)
+            if (!($resource instanceof GenericResource) || $this->isResourceAlreadyInPresentation($resource)) {
+                // Track slides even if already in presentation
+                if ($resource instanceof Slide) {
+                    $this->slides[] = $resource;
+                }
+                continue;
             }
 
             if ($resource instanceof Slide) {
-                $this->slides[] = $resource;
+                $slides[] = $resource;
+            } else {
+                $otherResources[] = $resource;
             }
+        }
+
+        // CRITICAL: Add slides FIRST to get rIds 2-N
+        foreach ($slides as $slide) {
+            $this->presentation->addResource($slide);
+            $this->slides[] = $slide;
+        }
+
+        // Then add system resources (masters, props, themes) to get rIds N+1...
+        foreach ($otherResources as $resource) {
+            $this->presentation->addResource($resource);
         }
     }
 
@@ -659,7 +645,7 @@ class PPTX
                     // This master will be reused - don't traverse its children
                     return $resourceList;
                 }
-                
+
                 // This master will be cloned - mark its Theme as force-clone
                 // so the new master gets its own theme reference
                 foreach ($resource->getResources() as $subResource) {
@@ -668,7 +654,14 @@ class PPTX
                     }
                 }
             }
-            
+
+            // CRITICAL: Don't traverse NoteSlide children to avoid circular references
+            // NoteSlides reference their parent Slide, which would cause the Slide
+            // to be cloned twice (first as root, then as NoteSlide's child)
+            if ($resource instanceof NoteSlide) {
+                return $resourceList;
+            }
+
             foreach ($resource->getResources() as $subResource) {
                 $this->getResourceTree($subResource, $resourceList, $forceCloneTargets);
             }
